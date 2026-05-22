@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Bot, ExternalLink, Github, GitFork, RefreshCw, Star, Zap } from "lucide-react";
+import { Bot, ExternalLink, Github, GitFork, RefreshCw, Rocket, Sparkles, Star, Zap } from "lucide-react";
 import type { IdeaRecord } from "@/lib/ideas-data";
 import type { GHFeedState, GHFeedType, GHRepo, GHRepoWithMatch } from "@/lib/github-types";
 import { findRelatedIdea, formatCount, languageColor, relativeTime } from "@/lib/github-utils";
@@ -17,6 +17,7 @@ export function GitHubFeedsWidget({ ideas, onIdeaSelect }: GitHubFeedsWidgetProp
   const [feedState, setFeedState] = useState<GHFeedState>({
     saas: [],
     ai: [],
+    events: [],
     isLoading: true,
     error: null,
     cachedAt: null,
@@ -56,7 +57,7 @@ export function GitHubFeedsWidget({ ideas, onIdeaSelect }: GitHubFeedsWidgetProp
   }, []);
 
   useEffect(() => {
-    void Promise.all([fetchFeed("saas"), fetchFeed("ai")]);
+    void Promise.all([fetchFeed("saas"), fetchFeed("ai"), fetchFeed("events")]);
   }, [fetchFeed]);
 
   useEffect(() => {
@@ -73,12 +74,15 @@ export function GitHubFeedsWidget({ ideas, onIdeaSelect }: GitHubFeedsWidgetProp
   }, []);
 
   const enrichedRepos = useMemo<GHRepoWithMatch[]>(() => {
-    const current = activeFeed === "saas" ? feedState.saas : feedState.ai;
+    const current =
+      activeFeed === "saas" ? feedState.saas
+      : activeFeed === "ai" ? feedState.ai
+      : feedState.events;
     return current.map((repo) => ({
       ...repo,
       relatedIdea: findRelatedIdea(`${repo.name} ${repo.description} ${repo.topics.join(" ")}`, ideas),
     }));
-  }, [activeFeed, feedState.saas, feedState.ai, ideas]);
+  }, [activeFeed, feedState.saas, feedState.ai, feedState.events, ideas]);
 
   const lastUpdated =
     feedState.cachedAt && now != null
@@ -107,22 +111,32 @@ export function GitHubFeedsWidget({ ideas, onIdeaSelect }: GitHubFeedsWidgetProp
           <button
             type="button"
             onClick={() => setActiveFeed("saas")}
-            className={`px-3 py-1.5 text-xs rounded-lg transition-colors inline-flex items-center gap-1 ${
-              activeFeed === "saas" ? "bg-background text-foreground" : "text-muted-foreground"
+            className={`px-2.5 py-1.5 text-xs rounded-lg transition-colors inline-flex items-center gap-1 ${
+              activeFeed === "saas" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground"
             }`}
           >
             <Zap className="w-3 h-3" />
-            Trending SaaS
+            SaaS
           </button>
           <button
             type="button"
             onClick={() => setActiveFeed("ai")}
-            className={`px-3 py-1.5 text-xs rounded-lg transition-colors inline-flex items-center gap-1 ${
-              activeFeed === "ai" ? "bg-background text-foreground" : "text-muted-foreground"
+            className={`px-2.5 py-1.5 text-xs rounded-lg transition-colors inline-flex items-center gap-1 ${
+              activeFeed === "ai" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground"
             }`}
           >
             <Bot className="w-3 h-3" />
             AI Tools
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveFeed("events")}
+            className={`px-2.5 py-1.5 text-xs rounded-lg transition-colors inline-flex items-center gap-1 ${
+              activeFeed === "events" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground"
+            }`}
+          >
+            <Rocket className="w-3 h-3" />
+            Launches
           </button>
         </div>
         <span className="text-[11px] text-muted-foreground">refreshed {lastUpdated}</span>
@@ -180,7 +194,13 @@ function RepoCard({ repo, onIdeaSelect }: { repo: GHRepoWithMatch; onIdeaSelect:
           <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">{repo.license}</span>
         ) : null}
       </div>
-      <p className="text-xs text-muted-foreground line-clamp-2 mb-2">{repo.description || "No description provided."}</p>
+      <p className="text-xs text-muted-foreground line-clamp-2 mb-1.5">{repo.description || "No description provided."}</p>
+      {repo.insight ? (
+        <div className="flex items-start gap-1 mb-2">
+          <Sparkles className="w-3 h-3 mt-0.5 text-amber-500 shrink-0" />
+          <p className="text-[11px] text-amber-600 dark:text-amber-400 leading-snug italic">{repo.insight}</p>
+        </div>
+      ) : null}
       <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
         <span className="inline-flex items-center gap-1"><Star className="w-3 h-3" />{formatCount(repo.stars)}</span>
         <span className="inline-flex items-center gap-1"><GitFork className="w-3 h-3" />{formatCount(repo.forks)}</span>

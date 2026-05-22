@@ -16,13 +16,15 @@ export interface GHRepo {
   createdAt: string;
   license: string | null;
   openIssues: number;
+  insight?: string;
 }
 
-export type GHFeedType = "saas" | "ai";
+export type GHFeedType = "saas" | "ai" | "events";
 
 export interface GHFeedState {
   saas: GHRepo[];
   ai: GHRepo[];
+  events: GHRepo[];
   isLoading: boolean;
   error: string | null;
   cachedAt: Date | null;

@@ -68,6 +68,9 @@
     "xlsx": "^0.18.5",
     "zod": "3.25.76"
   },
+  "pnpm": {
+    "ignoredBuilds": ["sharp"]
+  },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.9",
     "@types/node": "^22",
