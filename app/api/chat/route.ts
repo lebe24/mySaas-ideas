@@ -1,11 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 
+const MODEL = "claude-sonnet-4-20250514";
+
+const SEARCH_STOPWORDS = new Set([
+  "give", "tell", "show", "what", "when", "where", "why", "how",
+  "with", "about", "please", "recent", "latest",
+]);
+
 type ChatMessage = { role: "user" | "assistant"; content: string };
-type AnthropicMessage = { role: "user" | "assistant"; content: string | Array<Record<string, unknown>> };
 
 function sanitizeMessages(input: unknown): ChatMessage[] {
   if (!Array.isArray(input)) return [];
-
   return input
     .filter(
       (m: unknown): m is { role: string; content: string } =>
@@ -16,17 +21,7 @@ function sanitizeMessages(input: unknown): ChatMessage[] {
         ((m as { role: string }).role === "user" || (m as { role: string }).role === "assistant") &&
         typeof (m as { content: unknown }).content === "string",
     )
-    .map((m) => ({
-      role: m.role as "user" | "assistant",
-      content: m.content,
-    }));
-}
-
-function toAnthropicMessages(messages: ChatMessage[]) {
-  return messages.map((message): AnthropicMessage => ({
-    role: message.role,
-    content: message.content,
-  }));
+    .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
 }
 
 function extractTextFromContent(content: unknown): string {
@@ -102,7 +97,7 @@ async function buildWebContext(query: string): Promise<string> {
     .replace(/[^a-z0-9\s]/g, " ")
     .split(/\s+/)
     .filter(Boolean)
-    .filter((word) => !["give", "tell", "show", "what", "when", "where", "why", "how", "with", "about", "please", "recent", "latest"].includes(word))
+    .filter((word) => !SEARCH_STOPWORDS.has(word))
     .slice(0, 8)
     .join(" ");
   try {
@@ -164,7 +159,7 @@ export async function POST(req: NextRequest) {
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
+        model: MODEL,
         max_tokens: 1800,
         temperature: 0.4,
         system: `${systemPrompt}\n\n${
@@ -177,7 +172,7 @@ export async function POST(req: NextRequest) {
 - If LIVE_WEB_CONTEXT contains an error, say web access is temporarily unavailable for this request; do NOT claim you fundamentally lack web access.
 
 Answer directly. Do not ask to perform another search.`,
-        messages: toAnthropicMessages(chatMessages),
+        messages: chatMessages,
       }),
       cache: "no-store",
     });
