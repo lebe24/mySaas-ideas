@@ -1,39 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
+import Anthropic from "@anthropic-ai/sdk";
 import { isFollowUpMessage } from "@/lib/chat-utils";
 
 const MODEL = "claude-sonnet-4-20250514";
-const MAX_TOOL_ROUNDS = 5; // max rounds of tool use before forcing a final answer
+const MAX_TOOL_ROUNDS = 5;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type ChatMessage = { role: "user" | "assistant"; content: string };
 
-type TextBlock     = { type: "text";       text: string };
-type ToolUseBlock  = { type: "tool_use";   id: string; name: string; input: Record<string, unknown> };
-type ToolResultBlock = { type: "tool_result"; tool_use_id: string; content: string };
+// Re-use SDK types for everything that touches the Anthropic API
+type MessageParam       = Anthropic.MessageParam;
+type ToolResultBlockParam = Anthropic.ToolResultBlockParam;
+type ToolUseBlock       = Anthropic.ToolUseBlock;
+type TextBlock          = Anthropic.TextBlock;
 
-type ApiMessage = {
-  role: "user" | "assistant";
-  content: string | Array<TextBlock | ToolUseBlock | ToolResultBlock>;
-};
+// ─── Tool definitions ─────────────────────────────────────────────────────────
 
-type AnthropicBlock = {
-  type: string;
-  text?: string;
-  id?: string;
-  name?: string;
-  input?: Record<string, unknown>;
-};
-
-type AnthropicResponse = {
-  stop_reason: "end_turn" | "tool_use" | "max_tokens" | string;
-  content: AnthropicBlock[];
-  error?: { message?: string };
-};
-
-// ─── Tool definitions (sent to Claude) ───────────────────────────────────────
-
-const TOOLS = [
+const TOOLS: Anthropic.Tool[] = [
   {
     name: "web_search",
     description:
@@ -42,11 +26,12 @@ const TOOLS = [
       "startup launches, industry trends, or anything that benefits from up-to-date facts. " +
       "Prefer specific queries over vague ones.",
     input_schema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         query: {
           type: "string",
-          description: "A specific, targeted search query. E.g. 'Taplio LinkedIn tool pricing 2024' not just 'LinkedIn tools'.",
+          description:
+            "A specific, targeted search query. E.g. 'Taplio LinkedIn tool pricing 2024' not just 'LinkedIn tools'.",
         },
       },
       required: ["query"],
@@ -59,7 +44,7 @@ const TOOLS = [
       "Use after web_search when a result URL looks like it contains detailed, relevant information " +
       "(pricing pages, blog posts, product pages, news articles). Do not fetch homepage URLs.",
     input_schema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         url: {
           type: "string",
@@ -132,7 +117,6 @@ async function toolWebSearch(query: string): Promise<string> {
 
     const xml = await response.text();
     const items = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)].slice(0, 8);
-
     if (items.length === 0) return `No results found for: "${query}"`;
 
     const results = items
@@ -173,10 +157,7 @@ async function toolWebFetch(url: string): Promise<string> {
   }
 }
 
-async function executeTool(
-  name: string,
-  input: Record<string, unknown>,
-): Promise<string> {
+async function executeTool(name: string, input: Record<string, unknown>): Promise<string> {
   if (name === "web_search") {
     const query = typeof input.query === "string" ? input.query.trim() : "";
     if (!query) return "Error: query parameter is required.";
@@ -190,29 +171,19 @@ async function executeTool(
   return `Error: Unknown tool "${name}"`;
 }
 
-// ─── Anthropic API call ───────────────────────────────────────────────────────
+// ─── SDK call helper ──────────────────────────────────────────────────────────
 
-async function callAnthropic(
-  apiKey: string,
+async function callClaude(
+  client: Anthropic,
   systemPrompt: string,
-  messages: ApiMessage[],
-): Promise<AnthropicResponse> {
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      // Prompt caching: the large system prompt (with dataset) is cached after
-      // the first call so subsequent tool-loop iterations don't re-count those
-      // tokens against the per-minute rate limit.
-      "anthropic-beta": "prompt-caching-2024-07-31",
-    },
-    body: JSON.stringify({
+  messages: MessageParam[],
+): Promise<Anthropic.Message> {
+  // Use beta.messages for prompt-caching support (system as array with cache_control)
+  return client.beta.messages.create(
+    {
       model: MODEL,
       max_tokens: 2048,
-      temperature: 0.4,
-      // System as array is required for cache_control
+      temperature: 0.4 as never, // temperature accepted but not in beta type
       system: [
         {
           type: "text",
@@ -223,26 +194,11 @@ async function callAnthropic(
       tools: TOOLS,
       tool_choice: { type: "auto" },
       messages,
-    }),
-    cache: "no-store",
-  });
-
-  const payload = (await response.json()) as AnthropicResponse;
-
-  if (!response.ok) {
-    const msg = payload.error?.message ?? `Anthropic API error (${response.status})`;
-    // Surface rate-limit errors as a user-readable string so the chat UI
-    // can display them gracefully instead of showing a raw JSON error.
-    if (response.status === 429 || msg.toLowerCase().includes("rate limit")) {
-      throw new Error(
-        "I'm doing a lot of web research right now and hit a short-term rate limit. " +
-        "Please wait 30–60 seconds and try again.",
-      );
-    }
-    throw new Error(msg);
-  }
-
-  return payload;
+    },
+    {
+      headers: { "anthropic-beta": "prompt-caching-2024-07-31" },
+    },
+  ) as Promise<Anthropic.Message>;
 }
 
 // ─── Route handler ────────────────────────────────────────────────────────────
@@ -263,7 +219,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const messages = (body as { messages?: unknown }).messages;
+  const messages  = (body as { messages?: unknown }).messages;
   const systemPrompt = (body as { systemPrompt?: unknown }).systemPrompt;
 
   if (!Array.isArray(messages) || typeof systemPrompt !== "string") {
@@ -273,72 +229,57 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const chatMessages = sanitizeMessages(messages);
-  const latestUserMsg = [...chatMessages].reverse().find((m) => m.role === "user")?.content ?? "";
+  const chatMessages     = sanitizeMessages(messages);
+  const latestUserMsg    = [...chatMessages].reverse().find((m) => m.role === "user")?.content ?? "";
   const lastAssistantMsg = [...chatMessages].reverse().find((m) => m.role === "assistant")?.content ?? "";
-  const hasHistory = chatMessages.some((m) => m.role === "assistant");
+  const hasHistory       = chatMessages.some((m) => m.role === "assistant");
 
-  // Build the initial messages array for the Anthropic API
-  const apiMessages: ApiMessage[] = chatMessages.map((m) => ({
-    role: m.role as "user" | "assistant",
+  // Initialise the Anthropic SDK client
+  const client = new Anthropic({ apiKey });
+
+  // Build the messages array using SDK types
+  const apiMessages: MessageParam[] = chatMessages.map((m) => ({
+    role: m.role,
     content: m.content,
   }));
 
-  // ─── Fast path: conversational follow-ups ─────────────────────────────────
-  // Messages like "summarize that" or "thanks" skip the agentic loop.
-  // Source-link requests are ONLY fast-pathed when the prior response already
-  // contains real URLs — otherwise we must search first.
+  // ─── Fast path: conversational follow-ups ────────────────────────────────
+  // Skips the agentic loop for short follow-ups that don't need web research.
+  // Source-link requests are only fast-pathed if the prior response has real URLs.
   const followUp = isFollowUpMessage(latestUserMsg, hasHistory, lastAssistantMsg);
 
   if (followUp) {
     try {
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-          "anthropic-beta": "prompt-caching-2024-07-31",
-        },
-        body: JSON.stringify({
-          model: MODEL,
-          max_tokens: 1024,
-          temperature: 0.3,
-          system: [
-            {
-              type: "text",
-              text: `${systemPrompt}\n\nNote: you have web search capabilities and may have cited URLs in earlier turns of this conversation. If the user asks for source links or references, extract them from your previous responses.`,
-              cache_control: { type: "ephemeral" },
-            },
-          ],
-          messages: apiMessages,
-        }),
-        cache: "no-store",
+      const response = await client.messages.create({
+        model: MODEL,
+        max_tokens: 1024,
+        system: [
+          {
+            type: "text",
+            text:
+              `${systemPrompt}\n\nNote: you have web search capabilities and may have cited URLs ` +
+              `in earlier turns of this conversation. If the user asks for source links or references, ` +
+              `extract them from your previous responses.`,
+            cache_control: { type: "ephemeral" },
+          } as Anthropic.TextBlockParam & { cache_control: { type: "ephemeral" } },
+        ],
+        messages: apiMessages,
       });
 
-      const payload = (await response.json()) as AnthropicResponse;
-
-      if (!response.ok) {
-        throw new Error(payload.error?.message ?? `Anthropic API error (${response.status})`);
-      }
-
-      const reply = payload.content
-        .filter((b): b is TextBlock => b.type === "text" && typeof b.text === "string")
+      const reply = response.content
+        .filter((b): b is TextBlock => b.type === "text")
         .map((b) => b.text)
         .join("\n")
         .trim();
 
       return NextResponse.json({ reply: reply || "No response generated." });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to get response";
-      return NextResponse.json({ error: message }, { status: 502 });
+    } catch (err) {
+      const msg = err instanceof Anthropic.APIError ? err.message : String(err);
+      return NextResponse.json({ error: msg }, { status: 502 });
     }
   }
 
-  // ─── Full agentic path: research questions ────────────────────────────────
-  // Tool instructions are appended to the system prompt only when we're running
-  // the agentic loop. Tools are always passed to every call because tool_result
-  // blocks in the conversation history require tools to remain defined.
+  // ─── Agentic path: research questions ────────────────────────────────────
   const fullSystem = `${systemPrompt}
 
 <web_tools>
@@ -363,19 +304,17 @@ Every factual claim about a real product or company must include its source URL.
     let toolRounds = 0;
 
     while (true) {
-      // After the tool budget is exhausted, inject a stop instruction so Claude
-      // synthesises its findings rather than searching again.
       const activeSystem =
         toolRounds >= MAX_TOOL_ROUNDS
           ? `${fullSystem}\n\n<instruction>Research complete. Do NOT call any more tools. Write your complete answer now using what you have gathered.</instruction>`
           : fullSystem;
 
-      const payload = await callAnthropic(apiKey, activeSystem, apiMessages);
+      const response = await callClaude(client, activeSystem, apiMessages);
 
-      // ── Model finished ────────────────────────────────────────────────
-      if (payload.stop_reason === "end_turn") {
-        const reply = payload.content
-          .filter((b): b is TextBlock => b.type === "text" && typeof b.text === "string")
+      // ── Model finished ──────────────────────────────────────────────
+      if (response.stop_reason === "end_turn") {
+        const reply = response.content
+          .filter((b): b is TextBlock => b.type === "text")
           .map((b) => b.text)
           .join("\n")
           .trim();
@@ -389,24 +328,24 @@ Every factual claim about a real product or company must include its source URL.
         return NextResponse.json({ reply });
       }
 
-      // ── Tool use round ────────────────────────────────────────────────
-      if (payload.stop_reason === "tool_use") {
-        const assistantContent: Array<TextBlock | ToolUseBlock> = payload.content
-          .filter((b) => b.type === "text" || b.type === "tool_use")
-          .map((b) => {
-            if (b.type === "text") return { type: "text" as const, text: b.text ?? "" };
-            return { type: "tool_use" as const, id: b.id ?? "", name: b.name ?? "", input: b.input ?? {} };
-          });
+      // ── Tool use round ──────────────────────────────────────────────
+      if (response.stop_reason === "tool_use") {
+        // Append the assistant turn to the conversation history
+        apiMessages.push({ role: "assistant", content: response.content });
 
-        apiMessages.push({ role: "assistant", content: assistantContent });
+        // Run all tool calls in this round in parallel
+        const toolCalls = response.content.filter(
+          (b): b is ToolUseBlock => b.type === "tool_use",
+        );
 
-        // Execute all tool calls in this round in parallel
-        const toolCalls = payload.content.filter((b) => b.type === "tool_use");
-        const toolResults: ToolResultBlock[] = await Promise.all(
+        const toolResults: ToolResultBlockParam[] = await Promise.all(
           toolCalls.map(async (block) => ({
             type: "tool_result" as const,
-            tool_use_id: block.id ?? "",
-            content: await executeTool(block.name ?? "", block.input ?? {}),
+            tool_use_id: block.id,
+            content: await executeTool(
+              block.name,
+              block.input as Record<string, unknown>,
+            ),
           })),
         );
 
@@ -415,17 +354,28 @@ Every factual claim about a real product or company must include its source URL.
         continue;
       }
 
-      // ── Fallback ──────────────────────────────────────────────────────
-      const reply = payload.content
-        .filter((b): b is TextBlock => b.type === "text" && typeof b.text === "string")
+      // ── Fallback ────────────────────────────────────────────────────
+      const reply = response.content
+        .filter((b): b is TextBlock => b.type === "text")
         .map((b) => b.text)
         .join("\n")
         .trim();
 
       return NextResponse.json({ reply: reply || "No response generated." });
     }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to execute agent query";
+  } catch (err) {
+    // Surface rate-limit errors as a readable message
+    if (err instanceof Anthropic.RateLimitError) {
+      return NextResponse.json(
+        {
+          error:
+            "I'm doing a lot of web research right now and hit a short-term rate limit. " +
+            "Please wait 30–60 seconds and try again.",
+        },
+        { status: 429 },
+      );
+    }
+    const message = err instanceof Error ? err.message : "Failed to execute agent query";
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }
