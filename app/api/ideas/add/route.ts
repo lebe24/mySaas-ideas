@@ -39,35 +39,51 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Idea name is required." }, { status: 400 });
   }
 
-  const fileBuffer = await readFile(WORKBOOK_PATH);
-  const workbook = XLSX.read(fileBuffer, { type: "buffer" });
-  const firstSheetName = workbook.SheetNames[0];
-  const worksheet = workbook.Sheets[firstSheetName];
+  try {
+    const fileBuffer = await readFile(WORKBOOK_PATH);
+    const workbook = XLSX.read(fileBuffer, { type: "buffer" });
+    const firstSheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[firstSheetName];
 
-  const range = XLSX.utils.decode_range(worksheet["!ref"] ?? "A1");
-  const nextRow = range.e.r + 1;
+    const range = XLSX.utils.decode_range(worksheet["!ref"] ?? "A1");
 
-  const row = [
-    cellText(payload.idea),
-    cellText(payload.monthlyRevenue),
-    cellText(payload.monthlyTraffic),
-    cellText(payload.revenuePerVisitor),
-    cellText(payload.startingCosts),
-    cellText(payload.solopreneurScore),
-    cellText(payload.icp),
-    cellText(payload.growthTactics),
-    cellText(payload.validationReason),
-    cellText(payload.aiValidation?.summary),
-    cellText(payload.aiValidation?.score),
-  ];
+    const incomingName = payload.idea.trim().toLowerCase();
+    for (let r = range.s.r; r <= range.e.r; r++) {
+      const cell = worksheet[XLSX.utils.encode_cell({ r, c: 0 })];
+      if (cell && String(cell.v ?? "").trim().toLowerCase() === incomingName) {
+        return NextResponse.json({ error: "This idea already exists in the database." }, { status: 409 });
+      }
+    }
 
-  XLSX.utils.sheet_add_aoa(worksheet, [row], { origin: `A${nextRow + 1}` });
+    const nextRow = range.e.r + 1;
 
-  const output = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
-  await writeFile(WORKBOOK_PATH, output);
+    const row = [
+      cellText(payload.idea),
+      cellText(payload.monthlyRevenue),
+      cellText(payload.monthlyTraffic),
+      cellText(payload.revenuePerVisitor),
+      cellText(payload.startingCosts),
+      cellText(payload.solopreneurScore),
+      cellText(payload.icp),
+      cellText(payload.growthTactics),
+      cellText(payload.validationReason),
+      cellText(payload.aiValidation?.summary),
+      cellText(payload.aiValidation?.score),
+    ];
 
-  return NextResponse.json({
-    message: "Idea validated and added to spreadsheet.",
-    rowNumber: nextRow + 1,
-  });
+    XLSX.utils.sheet_add_aoa(worksheet, [row], { origin: `A${nextRow + 1}` });
+
+    const output = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+    await writeFile(WORKBOOK_PATH, output);
+
+    return NextResponse.json({
+      message: "Idea validated and added to spreadsheet.",
+      rowNumber: nextRow + 1,
+    });
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Failed to write to spreadsheet." },
+      { status: 500 },
+    );
+  }
 }
